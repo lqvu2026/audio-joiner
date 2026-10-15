@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Audio Joiner</title>
+<link rel="icon" href="audio-joiner-icon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="audio-joiner-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Audio Joiner">
+<style>
+  :root {
+    --bg: #f5f5f7; --card: #fff; --text: #1d1d1f; --muted: #6e6e73;
+    --accent: #0a84ff; --border: #d2d2d7; --danger: #ff3b30;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #000; --card: #1c1c1e; --text: #f5f5f7; --muted: #98989d; --border: #3a3a3c; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 16px; padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 8px 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 16px; }
+  .card { background: var(--card); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+  button, .btn {
+    font: inherit; border: 0; border-radius: 10px; padding: 12px 16px;
+    background: var(--accent); color: #fff; cursor: pointer; font-weight: 600;
+  }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.full { width: 100%; }
+  #drop {
+    border: 2px dashed var(--border); border-radius: 14px; padding: 22px;
+    text-align: center; color: var(--muted); cursor: pointer;
+  }
+  #drop.over { border-color: var(--accent); color: var(--accent); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    display: flex; align-items: center; gap: 8px; padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  li:last-child { border-bottom: 0; }
+  .num { color: var(--muted); width: 22px; text-align: right; flex: none; }
+  .info { flex: 1; min-width: 0; }
+  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dur { color: var(--muted); font-size: 13px; }
+  li button { padding: 6px 10px; background: transparent; color: var(--accent); font-size: 18px; }
+  li button.del { color: var(--danger); }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 0 0 6px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 140px; }
+  select, input[type=text], input[type=number] {
+    width: 100%; font: inherit; padding: 10px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  .seg { display: flex; gap: 8px; }
+  .seg button { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+  .seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  progress { width: 100%; height: 10px; margin-top: 10px; }
+  #status { color: var(--muted); font-size: 14px; margin-top: 8px; min-height: 20px; }
+  #result { display: none; }
+  audio { width: 100%; margin: 8px 0 12px; }
+  .total { color: var(--muted); font-size: 14px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Audio Joiner</h1>
+  <p class="sub">Combine MP3, WAV, OGG, M4A and other audio files into one soundtrack, with a short silence between each. Everything stays on your device.</p>
+
+  <div class="card">
+    <div id="drop">Tap to choose audio files<br><small>MP3, WAV, OGG, M4A, AAC, FLAC… or drop them here</small></div>
+    <input id="file" type="file" accept="audio/*,.mp3,.wav,.ogg,.oga,.opus,.m4a,.aac,.flac,.weba,.webm" multiple hidden>
+  </div>
+
+  <div class="card" id="listCard" style="display:none">
+    <ul id="list"></ul>
+    <div class="total" id="total"></div>
+  </div>
+
+  <div class="card">
+    <label>Silence between songs</label>
+    <div class="seg" id="gapSeg">
+      <button data-v="2">2 sec</button>
+      <button data-v="2.5">2.5 sec</button>
+      <button data-v="3" class="on">3 sec</button>
+      <button data-v="custom">Custom</button>
+    </div>
+    <div id="customWrap" style="display:none;margin-top:10px">
+      <label for="customGap">Seconds of silence (0–60)</label>
+      <input id="customGap" type="number" min="0" max="60" step="0.5" value="5" inputmode="decimal">
+    </div>
+    <label style="display:flex;align-items:center;gap:10px;margin:14px 0 0;color:var(--text)">
+      <input type="checkbox" id="fade" style="width:20px;height:20px">
+      Fade out / fade in around each gap (2 sec)
+    </label>
+    <div class="row" style="margin-top:14px">
+      <div>
+        <label for="fmt">Format</label>
+        <select id="fmt">
+          <option value="mp3">MP3</option>
+          <option value="wav">WAV (larger, lossless)</option>
+        </select>
+      </div>
+      <div id="brWrap">
+        <label for="br">MP3 quality</label>
+        <select id="br">
+          <option value="128">128 kbps</option>
+          <option value="192" selected>192 kbps</option>
+          <option value="256">256 kbps</option>
+          <option value="320">320 kbps</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-top:14px">
+      <label for="outName">File name</label>
+      <input id="outName" type="text" value="Joined" autocomplete="off" autocapitalize="off">
+    </div>
+  </div>
+
+  <button class="full" id="go" disabled>Join files</button>
+  <progress id="prog" value="0" max="1" style="display:none"></progress>
+  <div id="status"></div>
+
+  <div class="card" id="result">
+    <audio id="player" controls></audio>
+    <div class="row">
+      <div><button class="full" id="dl">Download</button></div>
+      <div><button class="full secondary" id="share">Share</button></div>
+    </div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+<script>
+(() => {
+  const RATE = 44100;
+  const $ = id => document.getElementById(id);
+  const items = []; // {file, buffer, duration}
+  let gap = 3;
+  let outBlob = null, outUrl = null;
+
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: RATE });
+
+  const fmtTime = s => {
+    s = Math.round(s);
+    return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  };
+  const setStatus = t => { $("status").textContent = t; };
+  const tick = () => new Promise(r => setTimeout(r, 0));
+
+  // ---- file picking ----
+  const drop = $("drop"), input = $("file");
+  drop.onclick = () => input.click();
+  input.onchange = () => { addFiles(input.files); input.value = ""; };
+  ["dragover", "dragenter"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", ev => addFiles(ev.dataTransfer.files));
+
+  async function addFiles(fileList) {
+    const files = Array.from(fileList);
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      setStatus(`Reading ${f.name} (${i + 1}/${files.length})…`);
+      try {
+        const data = await f.arrayBuffer();
+        const buffer = await new Promise((res, rej) => ctx.decodeAudioData(data, res, rej));
+        items.push({ file: f, buffer, duration: buffer.duration });
+      } catch (e) {
+        setStatus(`Couldn't read "${f.name}" (this browser may not support its format). Skipped.`);
+        await new Promise(r => setTimeout(r, 2500));
+      }
+    }
+    setStatus("");
+    render();
+  }
+
+  function render() {
+    const ul = $("list");
+    ul.innerHTML = "";
+    items.forEach((it, i) => {
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="num">${i + 1}</span>
+        <div class="info"><div class="name"></div><div class="dur">${fmtTime(it.duration)}</div></div>
+        <button title="Move up" ${i === 0 ? "disabled" : ""}>↑</button>
+        <button title="Move down" ${i === items.length - 1 ? "disabled" : ""}>↓</button>
+        <button class="del" title="Remove">✕</button>`;
+      li.querySelector(".name").textContent = it.file.name;
+      const [up, down, del] = li.querySelectorAll("button");
+      up.onclick = () => { [items[i - 1], items[i]] = [items[i], items[i - 1]]; render(); };
+      down.onclick = () => { [items[i + 1], items[i]] = [items[i], items[i + 1]]; render(); };
+      del.onclick = () => { items.splice(i, 1); render(); };
+      ul.appendChild(li);
+    });
+    $("listCard").style.display = items.length ? "" : "none";
+    const total = items.reduce((a, b) => a + b.duration, 0) + gap * Math.max(0, items.length - 1);
+    $("total").textContent = items.length ? `${items.length} file${items.length > 1 ? "s" : ""} · total ${fmtTime(total)} (with ${gap}s gaps)` : "";
+    $("go").disabled = items.length < 2;
+    $("result").style.display = "none";
+  }
+
+  // ---- gap / format controls ----
+  $("gapSeg").onclick = e => {
+    const b = e.target.closest("button"); if (!b) return;
+    const isCustom = b.dataset.v === "custom";
+    $("customWrap").style.display = isCustom ? "" : "none";
+    gap = isCustom ? readCustom() : parseFloat(b.dataset.v);
+    [...$("gapSeg").children].forEach(x => x.classList.toggle("on", x === b));
+    render();
+  };
+  const readCustom = () => {
+    const v = parseFloat($("customGap").value);
+    return isFinite(v) ? Math.max(0, Math.min(60, v)) : 0;
+  };
+  $("customGap").oninput = () => { gap = readCustom(); render(); };
+  $("fmt").onchange = () => { $("brWrap").style.display = $("fmt").value === "mp3" ? "" : "none"; };
+
+  // ---- join ----
+  $("go").onclick = async () => {
+    const fmt = $("fmt").value;
+    $("go").disabled = true;
+    $("result").style.display = "none";
+    $("prog").style.display = "";
+    $("prog").value = 0;
+    try {
+      // Build one stereo timeline
+      const gapSamples = Math.round(gap * RATE);
+      const total = items.reduce((a, it) => a + it.buffer.length, 0) + gapSamples * (items.length - 1);
+      const L = new Float32Array(total), R = new Float32Array(total); // zero-filled = silence
+      let pos = 0;
+      for (let i = 0; i < items.length; i++) {
+        const b = items[i].buffer;
+        const l = b.getChannelData(0);
+        const r = b.numberOfChannels > 1 ? b.getChannelData(1) : l;
+        L.set(l, pos); R.set(r, pos);
+        if ($("fade").checked) {
+          const F = Math.min(2 * RATE, Math.floor(b.length / 2));
+          for (let k = 0; k < F; k++) {
+            const g = k / F;
+            if (i > 0) { L[pos + k] *= g; R[pos + k] *= g; }                       // fade in
+            if (i < items.length - 1) {                                            // fade out
+              const e = pos + b.length - 1 - k;
+              L[e] *= g; R[e] *= g;
+            }
+          }
+        }
+        pos += b.length + gapSamples;
+      }
+      setStatus(fmt === "mp3" ? "Encoding MP3…" : "Building WAV…");
+      await tick();
+      outBlob = fmt === "mp3" ? await encodeMp3(L, R, parseInt($("br").value, 10)) : encodeWav(L, R);
+      if (outUrl) URL.revokeObjectURL(outUrl);
+      outUrl = URL.createObjectURL(outBlob);
+      $("player").src = outUrl;
+      $("result").style.display = "block";
+      setStatus(`Done · ${(outBlob.size / 1048576).toFixed(1)} MB`);
+    } catch (e) {
+      console.error(e);
+      setStatus("Something went wrong: " + e.message);
+    }
+    $("prog").style.display = "none";
+    $("go").disabled = items.length < 2;
+  };
+
+  const toInt16 = f => {
+    const o = new Int16Array(f.length);
+    for (let i = 0; i < f.length; i++) {
+      const s = Math.max(-1, Math.min(1, f[i]));
+      o[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return o;
+  };
+
+  async function encodeMp3(L, R, kbps) {
+    if (!window.lamejs) throw new Error("MP3 encoder didn't load. Check your internet connection.");
+    const enc = new lamejs.Mp3Encoder(2, RATE, kbps);
+    const l16 = toInt16(L), r16 = toInt16(R);
+    const block = 1152 * 20, out = [];
+    for (let i = 0; i < l16.length; i += block) {
+      const buf = enc.encodeBuffer(l16.subarray(i, i + block), r16.subarray(i, i + block));
+      if (buf.length) out.push(new Int8Array(buf));
+      if ((i / block) % 10 === 0) { $("prog").value = i / l16.length; await tick(); }
+    }
+    const end = enc.flush();
+    if (end.length) out.push(new Int8Array(end));
+    return new Blob(out, { type: "audio/mpeg" });
+  }
+
+  function encodeWav(L, R) {
+    const n = L.length, buf = new ArrayBuffer(44 + n * 4), v = new DataView(buf);
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    w(0, "RIFF"); v.setUint32(4, 36 + n * 4, true); w(8, "WAVE"); w(12, "fmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 2, true);
+    v.setUint32(24, RATE, true); v.setUint32(28, RATE * 4, true);
+    v.setUint16(32, 4, true); v.setUint16(34, 16, true);
+    w(36, "data"); v.setUint32(40, n * 4, true);
+    let o = 44;
+    for (let i = 0; i < n; i++) {
+      for (const ch of [L, R]) {
+        const s = Math.max(-1, Math.min(1, ch[i]));
+        v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); o += 2;
+      }
+    }
+    return new Blob([buf], { type: "audio/wav" });
+  }
+
+  // ---- output ----
+  function outFileName() {
+    const ext = $("fmt").value;
+    let base = $("outName").value.trim().replace(/[\\/:*?"<>|]/g, "") || "Joined";
+    base = base.replace(/\.(mp3|wav)$/i, "");
+    return base + "." + ext;
+  }
+  $("dl").onclick = () => {
+    if (!outBlob) return;
+    const a = document.createElement("a");
+    a.href = outUrl; a.download = outFileName();
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  $("share").onclick = async () => {
+    if (!outBlob) return;
+    const file = new File([outBlob], outFileName(), { type: outBlob.type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file] }); } catch (e) { /* cancelled */ }
+    } else {
+      $("dl").click();
+    }
+  };
+
+  render();
+})();
+</script>
+</body>
+</html>
