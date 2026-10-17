@@ -104,7 +104,7 @@
         <label for="fmt">Format</label>
         <select id="fmt">
           <option value="mp3">MP3</option>
-          <option value="wav">WAV (larger, lossless)</option>
+          <option value="wav">WAV (much larger, lossless)</option>
         </select>
       </div>
       <div id="brWrap">
@@ -140,12 +140,14 @@
 <script>
 (() => {
   const RATE = 44100;
+  const BLOCK = 1152 * 8;          // samples per encode step
   const $ = id => document.getElementById(id);
-  const items = []; // {file, buffer, duration}
+  const items = [];                // {file, duration} — audio is NOT kept in memory
   let gap = 3;
   let outBlob = null, outUrl = null;
 
-  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: RATE });
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC({ sampleRate: RATE });
 
   const fmtTime = s => {
     s = Math.round(s);
@@ -153,6 +155,27 @@
   };
   const setStatus = t => { $("status").textContent = t; };
   const tick = () => new Promise(r => setTimeout(r, 0));
+
+  // Duration from file metadata only (cheap); fall back to a throwaway decode.
+  function metaDuration(file) {
+    return new Promise(resolve => {
+      const url = URL.createObjectURL(file);
+      const a = new Audio();
+      a.preload = "metadata";
+      const done = d => { a.removeAttribute("src"); a.load(); URL.revokeObjectURL(url); resolve(d); };
+      a.onloadedmetadata = () => done(isFinite(a.duration) ? a.duration : null);
+      a.onerror = () => done(null);
+      setTimeout(() => done(null), 8000);
+      a.src = url;
+    });
+  }
+  async function decodeFile(file) {
+    const data = await file.arrayBuffer();
+    return await new Promise((res, rej) => {
+      const p = ctx.decodeAudioData(data, res, rej);
+      if (p && p.catch) p.catch(rej);
+    });
+  }
 
   // ---- file picking ----
   const drop = $("drop"), input = $("file");
@@ -167,14 +190,16 @@
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       setStatus(`Reading ${f.name} (${i + 1}/${files.length})…`);
-      try {
-        const data = await f.arrayBuffer();
-        const buffer = await new Promise((res, rej) => ctx.decodeAudioData(data, res, rej));
-        items.push({ file: f, buffer, duration: buffer.duration });
-      } catch (e) {
-        setStatus(`Couldn't read "${f.name}" (this browser may not support its format). Skipped.`);
-        await new Promise(r => setTimeout(r, 2500));
+      let d = await metaDuration(f);
+      if (d == null) {
+        try { d = (await decodeFile(f)).duration; }   // buffer is discarded right away
+        catch (e) {
+          setStatus(`Couldn't read "${f.name}" (this browser may not support its format). Skipped.`);
+          await new Promise(r => setTimeout(r, 2500));
+          continue;
+        }
       }
+      items.push({ file: f, duration: d });
     }
     setStatus("");
     render();
@@ -220,7 +245,55 @@
   $("customGap").oninput = () => { gap = readCustom(); render(); };
   $("fmt").onchange = () => { $("brWrap").style.display = $("fmt").value === "mp3" ? "" : "none"; };
 
-  // ---- join ----
+  // ---- streaming sinks: take PCM in small blocks, keep only the compressed output ----
+  const f2i = (f, a, b) => {
+    const o = new Int16Array(b - a);
+    for (let i = a; i < b; i++) {
+      const s = Math.max(-1, Math.min(1, f[i]));
+      o[i - a] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return o;
+  };
+
+  function makeMp3Sink(kbps) {
+    if (!window.lamejs) throw new Error("MP3 encoder didn't load. Check your internet connection.");
+    const enc = new lamejs.Mp3Encoder(2, RATE, kbps);
+    const parts = [];
+    return {
+      push(l, r) {                       // Int16Array each
+        const buf = enc.encodeBuffer(l, r);
+        if (buf.length) parts.push(new Int8Array(buf));
+      },
+      finish() {
+        const end = enc.flush();
+        if (end.length) parts.push(new Int8Array(end));
+        return new Blob(parts, { type: "audio/mpeg" });
+      }
+    };
+  }
+
+  function makeWavSink() {
+    const parts = []; let bytes = 0;
+    return {
+      push(l, r) {
+        const o = new Int16Array(l.length * 2);
+        for (let i = 0; i < l.length; i++) { o[2 * i] = l[i]; o[2 * i + 1] = r[i]; }
+        parts.push(o); bytes += o.byteLength;
+      },
+      finish() {
+        const h = new ArrayBuffer(44), v = new DataView(h);
+        const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+        w(0, "RIFF"); v.setUint32(4, 36 + bytes, true); w(8, "WAVE"); w(12, "fmt ");
+        v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 2, true);
+        v.setUint32(24, RATE, true); v.setUint32(28, RATE * 4, true);
+        v.setUint16(32, 4, true); v.setUint16(34, 16, true);
+        w(36, "data"); v.setUint32(40, bytes, true);
+        return new Blob([h, ...parts], { type: "audio/wav" });
+      }
+    };
+  }
+
+  // ---- join: one song in memory at a time ----
   $("go").onclick = async () => {
     const fmt = $("fmt").value;
     $("go").disabled = true;
@@ -228,32 +301,52 @@
     $("prog").style.display = "";
     $("prog").value = 0;
     try {
-      // Build one stereo timeline
-      const gapSamples = Math.round(gap * RATE);
-      const total = items.reduce((a, it) => a + it.buffer.length, 0) + gapSamples * (items.length - 1);
-      const L = new Float32Array(total), R = new Float32Array(total); // zero-filled = silence
-      let pos = 0;
+      if (ctx.state === "suspended") await ctx.resume();
+      const sink = fmt === "mp3" ? makeMp3Sink(parseInt($("br").value, 10)) : makeWavSink();
+      const fade = $("fade").checked;
+      const zero = new Int16Array(BLOCK);
+      let gapLeft;
+
       for (let i = 0; i < items.length; i++) {
-        const b = items[i].buffer;
-        const l = b.getChannelData(0);
-        const r = b.numberOfChannels > 1 ? b.getChannelData(1) : l;
-        L.set(l, pos); R.set(r, pos);
-        if ($("fade").checked) {
-          const F = Math.min(2 * RATE, Math.floor(b.length / 2));
+        setStatus(`Processing ${i + 1} of ${items.length}: ${items[i].file.name}`);
+        await tick();
+        let buf = await decodeFile(items[i].file);
+        const n = buf.length;
+        const L = buf.getChannelData(0);
+        const R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
+
+        if (fade) {                       // edit in place on this song only
+          const F = Math.min(2 * RATE, Math.floor(n / 2));
           for (let k = 0; k < F; k++) {
             const g = k / F;
-            if (i > 0) { L[pos + k] *= g; R[pos + k] *= g; }                       // fade in
-            if (i < items.length - 1) {                                            // fade out
-              const e = pos + b.length - 1 - k;
-              L[e] *= g; R[e] *= g;
-            }
+            if (i > 0) { L[k] *= g; if (R !== L) R[k] *= g; }
+            if (i < items.length - 1) { const e = n - 1 - k; L[e] *= g; if (R !== L) R[e] *= g; }
           }
         }
-        pos += b.length + gapSamples;
+
+        for (let p = 0; p < n; p += BLOCK) {
+          const end = Math.min(n, p + BLOCK);
+          sink.push(f2i(L, p, end), f2i(R, p, end));
+          if (((p / BLOCK) & 15) === 0) await tick();
+        }
+        buf = null;                       // let the decoded audio be freed
+
+        if (i < items.length - 1) {       // silence between songs
+          gapLeft = Math.round(gap * RATE);
+          while (gapLeft > 0) {
+            const c = Math.min(BLOCK, gapLeft);
+            const z = c === BLOCK ? zero : new Int16Array(c);
+            sink.push(z, z);
+            gapLeft -= c;
+          }
+        }
+        $("prog").value = (i + 1) / items.length;
+        await tick();
       }
-      setStatus(fmt === "mp3" ? "Encoding MP3…" : "Building WAV…");
+
+      setStatus("Finishing…");
       await tick();
-      outBlob = fmt === "mp3" ? await encodeMp3(L, R, parseInt($("br").value, 10)) : encodeWav(L, R);
+      outBlob = sink.finish();
       if (outUrl) URL.revokeObjectURL(outUrl);
       outUrl = URL.createObjectURL(outBlob);
       $("player").src = outUrl;
@@ -261,53 +354,11 @@
       setStatus(`Done · ${(outBlob.size / 1048576).toFixed(1)} MB`);
     } catch (e) {
       console.error(e);
-      setStatus("Something went wrong: " + e.message);
+      setStatus("Something went wrong: " + (e && e.message ? e.message : e));
     }
     $("prog").style.display = "none";
     $("go").disabled = items.length < 2;
   };
-
-  const toInt16 = f => {
-    const o = new Int16Array(f.length);
-    for (let i = 0; i < f.length; i++) {
-      const s = Math.max(-1, Math.min(1, f[i]));
-      o[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-    }
-    return o;
-  };
-
-  async function encodeMp3(L, R, kbps) {
-    if (!window.lamejs) throw new Error("MP3 encoder didn't load. Check your internet connection.");
-    const enc = new lamejs.Mp3Encoder(2, RATE, kbps);
-    const l16 = toInt16(L), r16 = toInt16(R);
-    const block = 1152 * 20, out = [];
-    for (let i = 0; i < l16.length; i += block) {
-      const buf = enc.encodeBuffer(l16.subarray(i, i + block), r16.subarray(i, i + block));
-      if (buf.length) out.push(new Int8Array(buf));
-      if ((i / block) % 10 === 0) { $("prog").value = i / l16.length; await tick(); }
-    }
-    const end = enc.flush();
-    if (end.length) out.push(new Int8Array(end));
-    return new Blob(out, { type: "audio/mpeg" });
-  }
-
-  function encodeWav(L, R) {
-    const n = L.length, buf = new ArrayBuffer(44 + n * 4), v = new DataView(buf);
-    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
-    w(0, "RIFF"); v.setUint32(4, 36 + n * 4, true); w(8, "WAVE"); w(12, "fmt ");
-    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 2, true);
-    v.setUint32(24, RATE, true); v.setUint32(28, RATE * 4, true);
-    v.setUint16(32, 4, true); v.setUint16(34, 16, true);
-    w(36, "data"); v.setUint32(40, n * 4, true);
-    let o = 44;
-    for (let i = 0; i < n; i++) {
-      for (const ch of [L, R]) {
-        const s = Math.max(-1, Math.min(1, ch[i]));
-        v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); o += 2;
-      }
-    }
-    return new Blob([buf], { type: "audio/wav" });
-  }
 
   // ---- output ----
   function outFileName() {
